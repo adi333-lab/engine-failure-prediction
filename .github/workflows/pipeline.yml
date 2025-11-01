@@ -1,0 +1,32 @@
+on:
+  push:
+    branches:
+      - main  # Automatically triggers on push to the main branch
+
+jobs:
+
+  register-dataset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install huggingface_hub
+
+      - name: Debug environment
+        run: |
+          echo "Checking HF_TOKEN..."
+          echo "${HF_TOKEN:0:6}******"
+          echo "Listing predictive_maintenance directory..."
+          ls -R predictive_maintenance
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      - name: Upload Dataset to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python predictive_maintenance/data/data_register.py
