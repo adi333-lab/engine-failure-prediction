@@ -15,7 +15,7 @@ from huggingface_hub import HfApi
 api = HfApi(token=os.getenv("HF_TOKEN"))
 
 # Load Dataset from HF Hub
-DATASET_PATH = "hf://datasets/adi333/engine-failure-prediction/data/engine_data.csv"
+DATASET_PATH = "hf://datasets/adi333/engine-failure-prediction/engine_data.csv"
 
 df = pd.read_csv(DATASET_PATH)
 print(" Dataset loaded successfully.")
