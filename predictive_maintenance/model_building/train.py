@@ -8,11 +8,16 @@ from huggingface_hub.utils import RepositoryNotFoundError
 
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score, classification_report, recall_score
-from sklearn.pipeline import Pipeline
+#from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 
+from sklearn.metrics import precision_recall_curve
+
 import xgboost as xgb
+
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline   
 
 
 # MLflow setup
@@ -20,7 +25,7 @@ mlflow.set_tracking_uri("https://brickred-deidre-unbelievingly.ngrok-free.dev")
 mlflow.set_experiment("Engine_Failure_MLops")
 
 
-# ✅ Load preprocessed data from Hugging Face dataset repository
+#  Load preprocessed data from Hugging Face dataset repository
 DATASET_REPO = "adi333/engine-failure-prediction"
 
 Xtrain = pd.read_csv(f"hf://datasets/adi333/engine-failure-prediction/Xtrain.csv")
@@ -43,32 +48,36 @@ preprocessor = ColumnTransformer(
 class_weight = ytrain.value_counts()[0] / ytrain.value_counts()[1]
 
 xgb_model = xgb.XGBClassifier(
-    scale_pos_weight=class_weight,
-    random_state=42,
-    eval_metric='logloss'
+    objective="binary:logistic",
+    eval_metric="logloss",
+    scale_pos_weight=class_weight * 3,   # boost positive class more
+    max_delta_step=1,                    # stabilizes imbalanced training
+    random_state=42
 )
 
 # Pipeline
 pipeline = Pipeline([
+    ("smote", SMOTE()),
     ("scaler", preprocessor),
     ("model", xgb_model)
 ])
 
-
-# Hyperparameters for XGBoost
+#Hyperparameters for xgboost
 param_grid = {
-    'model__n_estimators': [50, 75, 100, 125, 150],
-    'model__max_depth': [2, 3, 4],
-    'model__colsample_bytree': [0.4, 0.5, 0.6],
-    'model__colsample_bylevel': [0.4, 0.5, 0.6],
-    'model__learning_rate': [0.01, 0.05, 0.1],
-    'model__reg_lambda': [0.4, 0.5, 0.6],
+    "model__n_estimators": [300, 500, 700],
+    "model__max_depth": [4, 6, 8],
+    "model__learning_rate": [0.01, 0.05],
+    "model__subsample": [0.7, 0.9, 1.0],
+    "model__colsample_bytree": [0.7, 0.9, 1.0],
+    "model__gamma": [0, 2, 5],
+    "model__min_child_weight": [1, 3, 5],
+    "model__scale_pos_weight": [class_weight, class_weight * 2, class_weight * 3]
 }
 
 # Start MLflow run
 with mlflow.start_run():
     # Hyperparameter tuning with GridSearchCV
-    grid_search = GridSearchCV(pipeline, param_grid, cv=5, n_jobs=-1)
+    grid_search = GridSearchCV(pipeline, param_grid,scoring="recall", cv=5, n_jobs=-1)
     grid_search.fit(Xtrain, ytrain)
 
     # Log hyperparameters
@@ -77,15 +86,23 @@ with mlflow.start_run():
     # Store the best model
     best_model = grid_search.best_estimator_
 
-    # Set classification threshold
-    classification_threshold = 0.45
+    # Get prediction probabilities
+    y_scores = best_model.predict_proba(Xtest)[:, 1]
 
-    # Make predictions on the training and test data
+    # Find best threshold 
+    precisions, recalls, thresholds = precision_recall_curve(ytest, y_scores)
+
+    # Choose the best threshold
+    optimal_idx = recalls.argmax()  # maximize recall
+    best_threshold = thresholds[optimal_idx - 1] if optimal_idx > 0 else 0.1
+
+    print(f" Optimal threshold found: {best_threshold}")
+
     y_pred_train_proba = best_model.predict_proba(Xtrain)[:, 1]
-    y_pred_train = (y_pred_train_proba >= classification_threshold).astype(int)
+    y_pred_train = (y_pred_train_proba >= best_threshold).astype(int)
 
     y_pred_test_proba = best_model.predict_proba(Xtest)[:, 1]
-    y_pred_test = (y_pred_test_proba >= classification_threshold).astype(int)
+    y_pred_test = (y_pred_test_proba >= best_threshold).astype(int)
 
     # Evaluation
     train_report = classification_report(ytrain, y_pred_train, output_dict=True)
