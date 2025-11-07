@@ -1,24 +1,19 @@
 import os
 import pandas as pd
+import numpy as np
 import joblib
 import mlflow
 
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import accuracy_score, classification_report, recall_score
-#from sklearn.pipeline import Pipeline
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
+from sklearn.metrics import classification_report, precision_recall_curve
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 
-from sklearn.metrics import precision_recall_curve
-
 import xgboost as xgb
-
-from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline   
-
 
 # MLflow setup
 mlflow.set_tracking_uri("https://brickred-deidre-unbelievingly.ngrok-free.dev")
@@ -37,72 +32,112 @@ print(" Data loaded from Hugging Face dataset repo.")
 
 numeric_features = Xtrain.columns.tolist()
 
+# Data Clipping (from your successful code)
+lower_quantile = Xtrain[numeric_features].quantile(0.01)
+upper_quantile = Xtrain[numeric_features].quantile(0.99)
+
+Xtrain[numeric_features] = Xtrain[numeric_features].clip(
+    lower=lower_quantile,
+    upper=upper_quantile,
+    axis=1
+)
+Xtest[numeric_features] = Xtest[numeric_features].clip(
+    lower=lower_quantile,
+    upper=upper_quantile,
+    axis=1
+)
+
+# Creating validation dataset for early stopping
+X_train_main, X_val, y_train_main, y_val = train_test_split(
+    Xtrain, ytrain, test_size=0.2, random_state=42
+)
+
+# Compute class imbalance weight
+class_weight = y_train_main.value_counts()[0] / y_train_main.value_counts()[1]
+
+# Preprocessing
 preprocessor = ColumnTransformer(
     transformers=[
         ("scaler", StandardScaler(), numeric_features)
     ]
 )
 
+# Processing validation dataset 
+preprocessor.fit(X_train_main)
+X_val_processed = preprocessor.transform(X_val)
 
-# Compute class imbalance weight
-class_weight = ytrain.value_counts()[0] / ytrain.value_counts()[1]
-
+# Model Definition
 xgb_model = xgb.XGBClassifier(
-    objective="binary:logistic",
-    eval_metric="logloss",
-    scale_pos_weight=class_weight * 3,   # boost positive class more
-    max_delta_step=1,                    # stabilizes imbalanced training
-    random_state=42
+    scale_pos_weight=class_weight,
+    random_state=42,
+    n_estimators=1000,
+    early_stopping_rounds=50 
 )
 
-# Pipeline
-pipeline = Pipeline([
-    ("smote", SMOTE()),
-    ("scaler", preprocessor),
-    ("model", xgb_model)
-])
+#  Pipeline (from your successful code)
+model_pipeline = make_pipeline(preprocessor, xgb_model)
 
-#Hyperparameters for xgboost
-param_grid = {
-    "model__n_estimators": [300, 500, 700],
-    "model__max_depth": [4, 6, 8],
-    "model__learning_rate": [0.01, 0.05],
-    "model__subsample": [0.7, 0.9, 1.0],
-    "model__colsample_bytree": [0.7, 0.9, 1.0],
-    "model__gamma": [0, 2, 5],
-    "model__min_child_weight": [1, 3, 5],
-    "model__scale_pos_weight": [class_weight, class_weight * 2, class_weight * 3]
+#Hyperparameters for fine-tuning
+param_dist = {
+    'xgbclassifier__max_depth': [3, 4, 5, 6],
+    'xgbclassifier__colsample_bytree': [0.4, 0.5, 0.6, 0.7],
+    'xgbclassifier__colsample_bylevel': [0.4, 0.5, 0.6, 0.7],
+    'xgbclassifier__learning_rate': [0.01, 0.05, 0.1],
+    'xgbclassifier__reg_lambda': [5.0, 10.0, 20.0, 50.0],
+    'xgbclassifier__gamma': [0.5, 1.0, 2.0, 5.0],
+    'xgbclassifier__subsample': [0.6, 0.7, 0.8]
 }
 
 # Start MLflow run
 with mlflow.start_run():
-    # Hyperparameter tuning with GridSearchCV
-    grid_search = GridSearchCV(pipeline, param_grid,scoring="recall", cv=5, n_jobs=-1)
-    grid_search.fit(Xtrain, ytrain)
+    # Search Strategy
+    random_search = RandomizedSearchCV(
+        model_pipeline,
+        param_distributions=param_dist,
+        n_iter=50,
+        cv=5, # This will split X_train_main
+        scoring='f1',
+        verbose=1,
+        n_jobs=-1
+    )
+    
+    # Fitting the model (from your successful code)
+    random_search.fit(
+        X_train_main,  # <-- Use the smaller training set
+        y_train_main,
+        # Pass the eval_set to the 'xgbclassifier' step
+        xgbclassifier__eval_set=[(X_val_processed, y_val)], 
+        xgbclassifier__verbose=False
+    )
 
     # Log hyperparameters
-    mlflow.log_params(grid_search.best_params_)
+    mlflow.log_params(random_search.best_params_)
 
     # Store the best model
-    best_model = grid_search.best_estimator_
+    best_model = random_search.best_estimator_
 
-    # Get prediction probabilities
+    # Optimal Threshold 
     y_scores = best_model.predict_proba(Xtest)[:, 1]
-
-    # Find best threshold 
     precisions, recalls, thresholds = precision_recall_curve(ytest, y_scores)
 
-    # Choose the best threshold
-    optimal_idx = recalls.argmax()  # maximize recall
-    best_threshold = thresholds[optimal_idx - 1] if optimal_idx > 0 else 0.1
+    # Find best threshold by maximizing F1-score
+    f1_scores = (2 * precisions * recalls) / (precisions + recalls + 1e-9)
+    best_f1_index = np.argmax(f1_scores)
+    best_f1 = f1_scores[best_f1_index]
+    best_threshold = thresholds[best_f1_index]
 
-    print(f" Optimal threshold found: {best_threshold}")
+    print(f" Optimal threshold found: {best_threshold:.4f} (Best Test F1: {best_f1:.4f})")
+    mlflow.log_metric("best_test_f1_score", best_f1)
+    mlflow.log_metric("optimal_threshold", best_threshold)
+
+    # Use the BEST threshold for final predictions
+    classification_threshold = best_threshold 
 
     y_pred_train_proba = best_model.predict_proba(Xtrain)[:, 1]
-    y_pred_train = (y_pred_train_proba >= best_threshold).astype(int)
+    y_pred_train = (y_pred_train_proba >= classification_threshold).astype(int)
 
     y_pred_test_proba = best_model.predict_proba(Xtest)[:, 1]
-    y_pred_test = (y_pred_test_proba >= best_threshold).astype(int)
+    y_pred_test = (y_pred_test_proba >= classification_threshold).astype(int)
 
     # Evaluation
     train_report = classification_report(ytrain, y_pred_train, output_dict=True)
@@ -110,14 +145,14 @@ with mlflow.start_run():
 
     # Log metrics
     mlflow.log_metrics({
-        "train_accuracy": train_report['accuracy'],
-        "train_precision": train_report['1']['precision'],
-        "train_recall": train_report['1']['recall'],
-        "train_f1-score": train_report['1']['f1-score'],
-        "test_accuracy": test_report['accuracy'],
-        "test_precision": test_report['1']['precision'],
-        "test_recall": test_report['1']['recall'],
-        "test_f1-score": test_report['1']['f1-score']
+        "train_accuracy": train_report.get('accuracy', 0),
+        "train_precision": train_report.get('1', {}).get('precision', 0),
+        "train_recall": train_report.get('1', {}).get('recall', 0),
+        "train_f1-score": train_report.get('1', {}).get('f1-score', 0),
+        "test_accuracy": test_report.get('accuracy', 0),
+        "test_precision": test_report.get('1', {}).get('precision', 0),
+        "test_recall": test_report.get('1', {}).get('recall', 0),
+        "test_f1-score": test_report.get('1', {}).get('f1-score', 0)
     })
 
     # Save the model locally
@@ -142,13 +177,13 @@ with mlflow.start_run():
         create_repo(repo_id=repo_id, repo_type=repo_type, private=False)
         print(f"Space '{repo_id}' created.")
 
-    # create_repo("churn-model", repo_type="model", private=False)
+    # Upload the model
     api.upload_file(
-        path_or_fileobj="best_engine_failure_prediction_model_v1.joblib",
+        path_or_fileobj=model_path,
         path_in_repo="best_engine_failure_prediction_model_v1.joblib",
         repo_id=repo_id,
         repo_type=repo_type,
     )
 
-print(f"✅ Model uploaded to Hugging Face model repo: {repo_id}")
+print(f" Model uploaded to Hugging Face model repo: {repo_id}")
 print("\n🚀 Training + Logging + Upload COMPLETE!")
