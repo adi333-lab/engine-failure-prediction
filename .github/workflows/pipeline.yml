@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Install dependencies
-        run: pip install -r predictive_maintenance/data/requirements.txt
+        run: pip install -r predictive_maintenance/deployment/requirements.txt
       - name: Run Data Preparation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Install Dependencies
-        run: pip install -r predictive_maintenance/data/requirements.txt
+        run: pip install -r predictive_maintenance/deployment/requirements.txt
       - name: Start MLflow Server
         run: |
           nohup mlflow ui --host 0.0.0.0 --port 5000 &  # Run MLflow UI in the background
@@ -60,5 +60,18 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: | 
           python predictive_maintenance/model_building/train.py
+
+  deploy-hosting:
+    needs: [model-training,data-prep,register-dataset]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: pip install -r predictive_maintenance/deployment/requirements.txt
+      - name: Push files to Frontend Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python predictive_maintenance/hosting/hosting.py
         
 
