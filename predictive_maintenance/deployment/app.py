@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, HfApi
 import joblib
 
 # Initialize HF API with token from environment
