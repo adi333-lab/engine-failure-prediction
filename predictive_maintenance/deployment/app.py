@@ -10,6 +10,7 @@ api = HfApi(token=os.getenv("HF_TOKEN"))
 # Download and load the model from Hugging Face
 model_path = hf_hub_download(
     repo_id="adi333/engine-failure-prediction",
+    repo_type="model"
     filename="best_engine_failure_prediction_model_v1.joblib"
 )
 model = joblib.load(model_path)
